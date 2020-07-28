@@ -404,7 +404,7 @@ static void compute_lon_lat(const std::string &projection, LonLat which,
 
 static void compute_lon_lat_bounds(const std::string &projection,
                                    LonLat which,
-                                   IceModelVec3D &result) {
+                                   IceModelVec3 &result) {
   (void) projection;
   (void) which;
   (void) result;
