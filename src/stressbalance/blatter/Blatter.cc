@@ -335,6 +335,57 @@ void Blatter::residual_source_term(const fem::Element3 &element,
   }
 }
 
+void Blatter::residual_f(const fem::Element3 &element,
+                         const Vector2 *u_nodal,
+                         const double *B_nodal,
+                         Vector2 *residual) {
+
+  Vector2
+    *u   = m_work2[0],
+    *u_x = m_work2[1],
+    *u_y = m_work2[2],
+    *u_z = m_work2[3];
+
+  double *B = m_work[0];
+
+  // evaluate u and its partial derivatives at quadrature points
+  element.evaluate(u_nodal, u, u_x, u_y, u_z);
+
+  // evaluate B (ice hardness) at quadrature points
+  element.evaluate(B_nodal, B);
+
+  // loop over all quadrature points
+  for (int q = 0; q < element.n_pts(); ++q) {
+    auto W = element.weight(q);
+
+    double
+      ux = u_x[q].u,
+      uy = u_y[q].u,
+      uz = u_z[q].u,
+      vx = u_x[q].v,
+      vy = u_y[q].v,
+      vz = u_z[q].v;
+
+    double gamma = (ux * ux + vy * vy + ux * vy +
+                    0.25 * ((uy + vx) * (uy + vx) + uz * uz + vz * vz));
+
+    double eta;
+    m_flow_law->effective_viscosity(B[q], gamma, &eta, nullptr);
+
+    // loop over all test functions
+    for (int t = 0; t < element.n_chi(); ++t) {
+      const auto &psi = element.chi(q, t);
+
+      residual[t].u += W * (eta * (psi.dx * (4.0 * ux + 2.0 * vy) +
+                                   psi.dy * (uy + vx) +
+                                   psi.dz * uz));
+      residual[t].v += W * (eta * (psi.dx * (uy + vx) +
+                                   psi.dy * (2.0 * ux + 4.0 * vy) +
+                                   psi.dz * vz));
+    }
+  }
+}
+
 void Blatter::compute_residual(DMDALocalInfo *petsc_info,
                                const Vector2 ***x, Vector2 ***R) {
   auto info = grid_transpose(*petsc_info);
@@ -378,9 +429,9 @@ void Blatter::compute_residual(DMDALocalInfo *petsc_info,
   assert(face100.n_pts() <= Nq);
 
   // scalar quantities evaluated at quadrature points
-  double x_nodal[Nk], xq[Nq];
-  double y_nodal[Nk], yq[Nq];
-  double B_nodal[Nk], Bq[Nq];
+  double x_nodal[Nk];
+  double y_nodal[Nk];
+  double B_nodal[Nk];
   double sl_nodal[Nk], z_sl[Nq];
   double tauc_nodal[Nk], tauc[Nq];
   double f_nodal[Nk], floatation[Nq];
@@ -389,7 +440,7 @@ void Blatter::compute_residual(DMDALocalInfo *petsc_info,
   double zq[Nq];
 
   // 2D vector quantities evaluated at quadrature points
-  Vector2 u_nodal[Nk], u[Nq], u_x[Nq], u_y[Nq], u_z[Nq];
+  Vector2 u_nodal[Nk], u[Nq];
 
   // quantities evaluated at element nodes
   Vector2 R_nodal[Nk];
@@ -456,43 +507,10 @@ void Blatter::compute_residual(DMDALocalInfo *petsc_info,
           }
         }
 
-        // evaluate u and its partial derivatives at quadrature points
-        element.evaluate(u_nodal, u, u_x, u_y, u_z);
+        // "main" part of the residual
+        residual_f(element, u_nodal, B_nodal, R_nodal);
 
-        // evaluate B (ice hardness) at quadrature points
-        element.evaluate(B_nodal, Bq);
-
-        // loop over all quadrature points
-        for (int q = 0; q < element.n_pts(); ++q) {
-          auto W = element.weight(q);
-
-          double
-            ux = u_x[q].u,
-            uy = u_y[q].u,
-            uz = u_z[q].u,
-            vx = u_x[q].v,
-            vy = u_y[q].v,
-            vz = u_z[q].v;
-
-          double gamma = (ux * ux + vy * vy + ux * vy +
-                          0.25 * ((uy + vx) * (uy + vx) + uz * uz + vz * vz));
-
-          double eta;
-          m_flow_law->effective_viscosity(Bq[q], gamma, &eta, nullptr);
-
-          // loop over all test functions
-          for (int t = 0; t < Nk; ++t) {
-            const auto &psi = element.chi(q, t);
-
-            R_nodal[t].u += W * (eta * (psi.dx * (4.0 * ux + 2.0 * vy) +
-                                        psi.dy * (uy + vx) +
-                                        psi.dz * uz));
-            R_nodal[t].v += W * (eta * (psi.dx * (uy + vx) +
-                                        psi.dy * (2.0 * ux + 4.0 * vy) +
-                                        psi.dz * vz));
-          }
-        }
-
+        // the "source term" ()
         residual_source_term(element, s_nodal, R_nodal);
 
         // include basal drag
@@ -541,8 +559,6 @@ void Blatter::compute_residual(DMDALocalInfo *petsc_info,
             face->reset(f, z_nodal);
 
             // compute physical coordinates of quadrature points on this face
-            face->evaluate(x_nodal, xq);
-            face->evaluate(y_nodal, yq);
             face->evaluate(z_nodal.data(), zq);
             face->evaluate(sl_nodal, z_sl);
 

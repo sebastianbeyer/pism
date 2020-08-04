@@ -70,6 +70,8 @@ protected:
   // NB: I'm assuming that m_Nq >= m_Nk above.
   double m_work[m_n_work][m_Nq];
 
+  Vector2 m_work2[m_n_work][m_Nq];
+
   void init_impl();
 
   void define_model_state_impl(const File &output) const;
@@ -79,6 +81,11 @@ protected:
   void compute_jacobian(DMDALocalInfo *info, const Vector2 ***x, Mat A, Mat J);
 
   void compute_residual(DMDALocalInfo *info, const Vector2 ***xg, Vector2 ***yg);
+
+  void residual_f(const fem::Element3 &element,
+                  const Vector2 *u_nodal,
+                  const double *B_nodal,
+                  Vector2 *residual);
 
   void residual_source_term(const fem::Element3 &element,
                             const double *surface,
