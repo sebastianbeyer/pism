@@ -63,12 +63,12 @@ protected:
 
   CallbackData m_callback_data;
   GridInfo m_grid_info;
-  double m_rhog;
+  double m_rho_ice_g;
+  double m_rho_ocean_g;
 
   static const int m_Nq = 100;
   static const int m_n_work = 4;
 
-  // NB: I'm assuming that m_Nq >= m_Nk above.
   double m_work[m_n_work][m_Nq];
 
   Vector2 m_work2[m_n_work][m_Nq];
@@ -98,6 +98,12 @@ protected:
                       const double *f_nodal,
                       const Vector2 *u_nodal,
                       Vector2 *residual);
+
+  void residual_lateral(const fem::Element3 &element,
+                        const fem::Q1Element3Face &face,
+                        const double *z_nodal,
+                        const double *sl_nodal,
+                        Vector2 *residual);
 
   static PetscErrorCode jacobian_callback(DMDALocalInfo *info,
                                           const Vector2 ***x,

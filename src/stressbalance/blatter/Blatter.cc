@@ -329,8 +329,8 @@ void Blatter::residual_source_term(const fem::Element3 &element,
     for (int t = 0; t < element.n_chi(); ++t) {
       const auto &psi = element.chi(q, t);
 
-      residual[t].u += W * psi.val * m_rhog * s_x[q];
-      residual[t].v += W * psi.val * m_rhog * s_y[q];
+      residual[t].u += W * psi.val * m_rho_ice_g * s_x[q];
+      residual[t].v += W * psi.val * m_rho_ice_g * s_y[q];
     }
   }
 }
@@ -420,13 +420,39 @@ void Blatter::residual_basal(const fem::Element3 &element,
 
 }
 
+void Blatter::residual_lateral(const fem::Element3 &element,
+                               const fem::Q1Element3Face &face,
+                               const double *z_nodal,
+                               const double *sl_nodal,
+                               Vector2 *residual) {
+  double
+    *z         = m_work[0],
+    *sea_level = m_work[1];
+
+  // compute physical coordinates of quadrature points on this face
+  face.evaluate(z_nodal, z);
+  face.evaluate(sl_nodal, sea_level);
+
+  // loop over all quadrature points
+  for (int q = 0; q < face.n_pts(); ++q) {
+    auto W = face.weight(q);
+    auto N3 = face.normal(q);
+    Vector2 N = {N3.x, N3.y};
+
+    double p = m_rho_ocean_g * std::max(sea_level[q] - z[q], 0.0);
+
+    // loop over all test functions
+    for (int t = 0; t < element.n_chi(); ++t) {
+      auto psi = face.chi(q, t);
+
+      residual[t] += W * psi * p * N;
+    }
+  }
+}
+
 void Blatter::compute_residual(DMDALocalInfo *petsc_info,
                                const Vector2 ***x, Vector2 ***R) {
   auto info = grid_transpose(*petsc_info);
-
-  double
-    g = m_config->get_number("constants.standard_gravity"),
-    rho_w = m_config->get_number("constants.sea_water.density");
 
   // Stencil width of 1 is not very important, but if info.sw > 1 will lead to more
   // redundant computation (we would be looping over elements that don't contribute to any
@@ -446,63 +472,55 @@ void Blatter::compute_residual(DMDALocalInfo *petsc_info,
     face4(dx, dy, fem::Q1Quadrature4()),     // 4-point Gaussian quadrature
     face100(dx, dy, fem::Q1QuadratureN(10)); // 100-point quadrature for grounding lines
                                              // and partially-submerged faces
-
-  DataAccess<Parameters**> P(info.da, 2, GHOSTED);
-  DataAccess<double***> ice_hardness(info.da, 3, GHOSTED);
-
-  residual_dirichlet(m_grid_info, info, P, x, R);
+  assert(element.n_pts() <= m_Nq);
+  assert(face4.n_pts() <= m_Nq);
+  assert(face100.n_pts() <= m_Nq);
 
   // Maximum number of nodes per element.
   const int Nk = fem::q13d::n_chi;
   assert(element.n_chi() <= Nk);
 
-  // Maximum number of quadrature points per element or face
-  const int Nq = 100;
-  assert(element.n_pts() <= Nq);
-  assert(face4.n_pts() <= Nq);
-  assert(face100.n_pts() <= Nq);
-
-  // scalar quantities evaluated at quadrature points
+  // scalar quantities
+  std::vector<double> z_nodal(Nk);
   double x_nodal[Nk];
   double y_nodal[Nk];
   double B_nodal[Nk];
-  double sl_nodal[Nk], z_sl[Nq];
+  double sl_nodal[Nk];
   double tauc_nodal[Nk];
   double f_nodal[Nk];
-
-  std::vector<double> z_nodal(Nk);
-  double zq[Nq];
-
-  // 2D vector quantities evaluated at quadrature points
-  Vector2 u_nodal[Nk];
-
-  // quantities evaluated at element nodes
-  Vector2 R_nodal[Nk];
-  int node_type[Nk];
   double b_nodal[Nk];
   double H_nodal[Nk];
   double s_nodal[Nk];
+  int node_type[Nk];
+
+  // 2D vector quantities
+  Vector2 u_nodal[Nk];
+  Vector2 R_nodal[Nk];
+
+  DataAccess<Parameters**> P(info.da, 2, GHOSTED);
+  DataAccess<double***> ice_hardness(info.da, 3, GHOSTED);
+
+  // Compute the residual at Dirichlet nodes and set it to zero elsewhere.
+  residual_dirichlet(m_grid_info, info, P, x, R);
 
   // loop over all the elements that have at least one owned node
   for (int j = info.gys; j < info.gys + info.gym - 1; j++) {
     for (int i = info.gxs; i < info.gxs + info.gxm - 1; i++) {
 
-      // Compute or fetch 2D geometric info
+      // Initialize 2D geometric info at element nodes
       for (int n = 0; n < Nk; ++n) {
         auto I = element.local_to_global(i, j, 0, n);
 
         auto p = P[I.j][I.i];
 
         node_type[n] = p.node_type;
+        s_nodal[n]   = p.bed + p.thickness;
+        sl_nodal[n]  = p.sea_level;
+        b_nodal[n]   = p.bed;
+        H_nodal[n]   = p.thickness;
 
         x_nodal[n] = m_grid_info.x(dx, I.i);
         y_nodal[n] = m_grid_info.y(dy, I.j);
-
-        s_nodal[n]  = p.bed + p.thickness;
-        sl_nodal[n] = p.sea_level;
-
-        b_nodal[n] = p.bed;
-        H_nodal[n] = p.thickness;
       }
 
       // skip ice-free (exterior) elements
@@ -510,6 +528,7 @@ void Blatter::compute_residual(DMDALocalInfo *petsc_info,
         continue;
       }
 
+      // loop over elements in a column
       for (int k = info.gzs; k < info.gzs + info.gzm - 1; k++) {
 
         // Reset element residual to zero in preparation.
@@ -529,25 +548,27 @@ void Blatter::compute_residual(DMDALocalInfo *petsc_info,
         element.nodal_values((double***)ice_hardness, B_nodal);
 
         // Get nodal values of u.
-        element.nodal_values(x, u_nodal);
+        {
+          element.nodal_values(x, u_nodal);
 
-        // Take care of Dirichlet BC: don't contribute to Dirichlet nodes and set nodal
-        // values of the current iterate to Dirichlet BC values.
-        for (int n = 0; n < Nk; ++n) {
-          auto I = element.local_to_global(n);
-          if (dirichlet_node(info, I)) {
-            element.mark_row_invalid(n);
-            u_nodal[n] = u_bc(x_nodal[n], y_nodal[n], z_nodal[n]);
+          // Take care of Dirichlet BC: don't contribute to Dirichlet nodes and set nodal
+          // values of the current iterate to Dirichlet BC values.
+          for (int n = 0; n < Nk; ++n) {
+            auto I = element.local_to_global(n);
+            if (dirichlet_node(info, I)) {
+              element.mark_row_invalid(n);
+              u_nodal[n] = u_bc(x_nodal[n], y_nodal[n], z_nodal[n]);
+            }
           }
         }
 
         // "main" part of the residual
         residual_f(element, u_nodal, B_nodal, R_nodal);
 
-        // the "source term" ()
+        // the "source term" (driving stress)
         residual_source_term(element, s_nodal, R_nodal);
 
-        // include basal drag
+        // basal boundary
         if (k == 0) {
 
           for (int n = 0; n < Nk; ++n) {
@@ -559,42 +580,21 @@ void Blatter::compute_residual(DMDALocalInfo *petsc_info,
 
           // use an N*N-point equally-spaced quadrature at grounding lines
           fem::Q1Element3Face *face = grounding_line(f_nodal) ? &face100 : &face4;
-
           // face 4 is the bottom face in fem::q13d::incident_nodes
           face->reset(4, z_nodal);
 
           residual_basal(element, *face, tauc_nodal, f_nodal, u_nodal, R_nodal);
         }
 
+        // lateral boundary
         // loop over all vertical faces (see fem::q13d::incident_nodes for the order)
-        for (int f = 0; f < 4; ++f) {
+        for (int f = 0; f < 4 and neumann_bc_face(f, node_type); ++f) {
+          // use an N*N-point equally-spaced quadrature at for partially-submerged faces
+          fem::Q1Element3Face *face = (partially_submerged_face(f, z_nodal.data(), sl_nodal) ?
+                                       &face100 : &face4);
+          face->reset(f, z_nodal);
 
-          if (neumann_bc_face(f, node_type)) {
-            // use an N*N-point equally-spaced quadrature at for partially-submerged faces
-            fem::Q1Element3Face *face = partially_submerged_face(f, z_nodal.data(), sl_nodal) ? &face100 : &face4;
-
-            face->reset(f, z_nodal);
-
-            // compute physical coordinates of quadrature points on this face
-            face->evaluate(z_nodal.data(), zq);
-            face->evaluate(sl_nodal, z_sl);
-
-            // loop over all quadrature points
-            for (int q = 0; q < face->n_pts(); ++q) {
-              auto W = face->weight(q);
-              auto N3 = face->normal(q);
-              Vector2 N = {N3.x, N3.y};
-
-              double p = rho_w * g * std::max(z_sl[q] - zq[q], 0.0);
-
-              // loop over all test functions
-              for (int t = 0; t < Nk; ++t) {
-                auto psi = face->chi(q, t);
-
-                R_nodal[t] += W * psi * p * N;
-              }
-            }
-          } // end of "if (neumann_bc_face())"
+          residual_lateral(element, *face, z_nodal.data(), sl_nodal, R_nodal);
         } // end of the loop over element faces
 
         element.add_contribution(R_nodal, R);
@@ -949,8 +949,10 @@ Blatter::Blatter(IceGrid::ConstPtr grid, int Mz, int n_levels, int coarsening_fa
     m_flow_law = ice_factory.create();
   }
 
-  m_rhog = (m_config->get_number("constants.ice.density") *
-            m_config->get_number("constants.standard_gravity"));
+  double g = m_config->get_number("constants.standard_gravity");
+
+  m_rho_ice_g = m_config->get_number("constants.ice.density") * g;
+  m_rho_ocean_g = m_config->get_number("constants.sea_water.density") * g;
 }
 
 /*!
