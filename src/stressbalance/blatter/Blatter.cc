@@ -631,7 +631,49 @@ static void jacobian_dirichlet(const DMDALocalInfo &info, Parameters **P, Mat J)
       }
     }
   }
+}
 
+void Blatter::jacobian_basal(const fem::Q1Element3Face &face,
+                             const double *tauc_nodal,
+                             const double *f_nodal,
+                             const Vector2 *u_nodal,
+                             double K[16][16]) {
+  int Nk = fem::q13d::n_chi;
+
+  Vector2 *u = m_work2[0];
+
+  double
+    *tauc = m_work[0],
+    *floatation = m_work[1];
+
+  face.evaluate(u_nodal, u);
+  face.evaluate(tauc_nodal, tauc);
+  face.evaluate(f_nodal, floatation);
+
+  for (int q = 0; q < face.n_pts(); ++q) {
+    auto W = face.weight(q);
+
+    bool grounded = floatation[q] <= 0.0;
+    double beta = 0.0, dbeta = 0.0;
+    if (grounded) {
+      m_basal_sliding_law->drag_with_derivative(tauc[q], u[q].u, u[q].v, &beta, &dbeta);
+    }
+
+    // loop over all test functions
+    for (int t = 0; t < Nk; ++t) {
+      auto psi = face.chi(q, t);
+      for (int s = 0; s < Nk; ++s) {
+        auto phi = face.chi(q, s);
+
+        double p = psi * phi;
+
+        K[t * 2 + 0][s * 2 + 0] += W * p * (beta + dbeta * u[q].u * u[q].u);
+        K[t * 2 + 0][s * 2 + 1] += W * p * dbeta * u[q].u * u[q].v;
+        K[t * 2 + 1][s * 2 + 0] += W * p * dbeta * u[q].v * u[q].u;
+        K[t * 2 + 1][s * 2 + 1] += W * p * (beta + dbeta * u[q].v * u[q].v);
+      }
+    }
+  }
 }
 
 void Blatter::compute_jacobian(DMDALocalInfo *petsc_info,
@@ -799,7 +841,6 @@ void Blatter::compute_jacobian(DMDALocalInfo *petsc_info,
 
         // include basal drag
         if (k == 0) {
-
           for (int n = 0; n < Nk; ++n) {
             auto I = element.local_to_global(n);
 
@@ -812,34 +853,7 @@ void Blatter::compute_jacobian(DMDALocalInfo *petsc_info,
           // face 4 is the bottom face in fem::q13d::incident_nodes
           face->reset(4, z_nodal);
 
-          face->evaluate(u_nodal, u);
-          face->evaluate(tauc_nodal, tauc);
-          face->evaluate(f_nodal, floatation);
-
-          for (int q = 0; q < face->n_pts(); ++q) {
-            auto W = face->weight(q);
-
-            bool grounded = floatation[q] <= 0.0;
-            double beta = 0.0, dbeta = 0.0;
-            if (grounded) {
-              m_basal_sliding_law->drag_with_derivative(tauc[q], u[q].u, u[q].v, &beta, &dbeta);
-            }
-
-            // loop over all test functions
-            for (int t = 0; t < Nk; ++t) {
-              auto psi = face->chi(q, t);
-              for (int s = 0; s < Nk; ++s) {
-                auto phi = face->chi(q, s);
-
-                double p = psi * phi;
-
-                K[t * 2 + 0][s * 2 + 0] += W * p * (beta + dbeta * u[q].u * u[q].u);
-                K[t * 2 + 0][s * 2 + 1] += W * p * dbeta * u[q].u * u[q].v;
-                K[t * 2 + 1][s * 2 + 0] += W * p * dbeta * u[q].v * u[q].u;
-                K[t * 2 + 1][s * 2 + 1] += W * p * (beta + dbeta * u[q].v * u[q].v);
-              }
-            }
-          }
+          jacobian_basal(*face, tauc, f_nodal, u_nodal, K);
         }
 
         // fill the lower-triangular part of the element Jacobian using the fact that J is

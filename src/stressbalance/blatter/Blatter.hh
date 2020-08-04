@@ -23,6 +23,7 @@
 #include "pism/util/petscwrappers/SNES.hh"
 #include "pism/util/petscwrappers/DM.hh"
 #include "pism/util/petscwrappers/Vec.hh"
+#include "pism/util/fem/FEM.hh"
 
 #include "grid_hierarchy.hh"    // GridInfo
 
@@ -80,6 +81,12 @@ protected:
   void write_model_state_impl(const File &output) const;
 
   void compute_jacobian(DMDALocalInfo *info, const Vector2 ***x, Mat A, Mat J);
+
+  void jacobian_basal(const fem::Q1Element3Face &face,
+                      const double *tauc_nodal,
+                      const double *f_nodal,
+                      const Vector2 *u_nodal,
+                      double K[2 * fem::q13d::n_chi][2 * fem::q13d::n_chi]);
 
   void compute_residual(DMDALocalInfo *info, const Vector2 ***xg, Vector2 ***yg);
 
