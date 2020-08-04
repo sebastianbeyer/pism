@@ -311,6 +311,30 @@ static void residual_dirichlet(const GridInfo &grid_info,
   }
 }
 
+void Blatter::residual_source_term(const fem::Element3 &element,
+                                   const double *surface,
+                                   Vector2 *residual) {
+  double
+    *s   = m_work[0],
+    *s_x = m_work[1],
+    *s_y = m_work[2],
+    *s_z = m_work[3];
+
+  element.evaluate(surface, s, s_x, s_y, s_z);
+
+  for (int q = 0; q < element.n_pts(); ++q) {
+    auto W = element.weight(q);
+
+    // loop over all test functions
+    for (int t = 0; t < element.n_chi(); ++t) {
+      const auto &psi = element.chi(q, t);
+
+      residual[t].u += W * psi.val * m_rhog * s_x[q];
+      residual[t].v += W * psi.val * m_rhog * s_y[q];
+    }
+  }
+}
+
 void Blatter::compute_residual(DMDALocalInfo *petsc_info,
                                const Vector2 ***x, Vector2 ***R) {
   auto info = grid_transpose(*petsc_info);
@@ -357,7 +381,6 @@ void Blatter::compute_residual(DMDALocalInfo *petsc_info,
   double x_nodal[Nk], xq[Nq];
   double y_nodal[Nk], yq[Nq];
   double B_nodal[Nk], Bq[Nq];
-  double s_nodal[Nk], s[Nq], s_x[Nq], s_y[Nq], s_z[Nq];
   double sl_nodal[Nk], z_sl[Nq];
   double tauc_nodal[Nk], tauc[Nq];
   double f_nodal[Nk], floatation[Nq];
@@ -373,6 +396,7 @@ void Blatter::compute_residual(DMDALocalInfo *petsc_info,
   int node_type[Nk];
   double b_nodal[Nk];
   double H_nodal[Nk];
+  double s_nodal[Nk];
 
   // loop over all the elements that have at least one owned node
   for (int j = info.gys; j < info.gys + info.gym - 1; j++) {
@@ -469,20 +493,7 @@ void Blatter::compute_residual(DMDALocalInfo *petsc_info,
           }
         }
 
-        // compute the surface gradient at quadrature points
-        element.evaluate(s_nodal, s, s_x, s_y, s_z);
-
-        for (int q = 0; q < element.n_pts(); ++q) {
-          auto W = element.weight(q);
-
-          // loop over all test functions
-          for (int t = 0; t < Nk; ++t) {
-            const auto &psi = element.chi(q, t);
-
-            R_nodal[t].u += W * psi.val * m_rhog * s_x[q];
-            R_nodal[t].v += W * psi.val * m_rhog * s_y[q];
-          }
-        }
+        residual_source_term(element, s_nodal, R_nodal);
 
         // include basal drag
         if (k == 0) {

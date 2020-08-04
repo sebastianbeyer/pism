@@ -27,6 +27,11 @@
 #include "grid_hierarchy.hh"    // GridInfo
 
 namespace pism {
+
+namespace fem {
+class Element3;
+} // end of namespace fem
+
 namespace stressbalance {
 
 class Blatter : public ShallowStressBalance {
@@ -59,6 +64,12 @@ protected:
   GridInfo m_grid_info;
   double m_rhog;
 
+  static const int m_Nq = 100;
+  static const int m_n_work = 4;
+
+  // NB: I'm assuming that m_Nq >= m_Nk above.
+  double m_work[m_n_work][m_Nq];
+
   void init_impl();
 
   void define_model_state_impl(const File &output) const;
@@ -68,6 +79,10 @@ protected:
   void compute_jacobian(DMDALocalInfo *info, const Vector2 ***x, Mat A, Mat J);
 
   void compute_residual(DMDALocalInfo *info, const Vector2 ***xg, Vector2 ***yg);
+
+  void residual_source_term(const fem::Element3 &element,
+                            const double *surface,
+                            Vector2 *residual);
 
   static PetscErrorCode jacobian_callback(DMDALocalInfo *info,
                                           const Vector2 ***x,
