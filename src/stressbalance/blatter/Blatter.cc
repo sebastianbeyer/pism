@@ -386,6 +386,40 @@ void Blatter::residual_f(const fem::Element3 &element,
   }
 }
 
+void Blatter::residual_basal(const fem::Element3 &element,
+                             const fem::Q1Element3Face &face,
+                             const double *tauc_nodal,
+                             const double *f_nodal,
+                             const Vector2 *u_nodal,
+                             Vector2 *residual) {
+
+  Vector2 *u = m_work2[0];
+
+  double
+    *tauc       = m_work[0],
+    *floatation = m_work[1];
+
+  face.evaluate(u_nodal, u);
+  face.evaluate(tauc_nodal, tauc);
+  face.evaluate(f_nodal, floatation);
+
+  for (int q = 0; q < face.n_pts(); ++q) {
+    auto W = face.weight(q);
+
+    bool grounded = floatation[q] <= 0.0;
+    double beta = grounded ? m_basal_sliding_law->drag(tauc[q], u[q].u, u[q].v) : 0.0;
+
+    // loop over all test functions
+    for (int t = 0; t < element.n_chi(); ++t) {
+      auto psi = face.chi(q, t);
+
+      residual[t].u += W * psi * beta * u[q].u;
+      residual[t].v += W * psi * beta * u[q].v;
+    }
+  }
+
+}
+
 void Blatter::compute_residual(DMDALocalInfo *petsc_info,
                                const Vector2 ***x, Vector2 ***R) {
   auto info = grid_transpose(*petsc_info);
@@ -433,14 +467,14 @@ void Blatter::compute_residual(DMDALocalInfo *petsc_info,
   double y_nodal[Nk];
   double B_nodal[Nk];
   double sl_nodal[Nk], z_sl[Nq];
-  double tauc_nodal[Nk], tauc[Nq];
-  double f_nodal[Nk], floatation[Nq];
+  double tauc_nodal[Nk];
+  double f_nodal[Nk];
 
   std::vector<double> z_nodal(Nk);
   double zq[Nq];
 
   // 2D vector quantities evaluated at quadrature points
-  Vector2 u_nodal[Nk], u[Nq];
+  Vector2 u_nodal[Nk];
 
   // quantities evaluated at element nodes
   Vector2 R_nodal[Nk];
@@ -529,24 +563,7 @@ void Blatter::compute_residual(DMDALocalInfo *petsc_info,
           // face 4 is the bottom face in fem::q13d::incident_nodes
           face->reset(4, z_nodal);
 
-          face->evaluate(u_nodal, u);
-          face->evaluate(tauc_nodal, tauc);
-          face->evaluate(f_nodal, floatation);
-
-          for (int q = 0; q < face->n_pts(); ++q) {
-            auto W = face->weight(q);
-
-            bool grounded = floatation[q] <= 0.0;
-            double beta = grounded ? m_basal_sliding_law->drag(tauc[q], u[q].u, u[q].v) : 0.0;
-
-            // loop over all test functions
-            for (int t = 0; t < Nk; ++t) {
-              auto psi = face->chi(q, t);
-
-              R_nodal[t].u += W * psi * beta * u[q].u;
-              R_nodal[t].v += W * psi * beta * u[q].v;
-            }
-          }
+          residual_basal(element, *face, tauc_nodal, f_nodal, u_nodal, R_nodal);
         }
 
         // loop over all vertical faces (see fem::q13d::incident_nodes for the order)

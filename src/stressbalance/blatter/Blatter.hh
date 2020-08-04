@@ -30,6 +30,7 @@ namespace pism {
 
 namespace fem {
 class Element3;
+class Q1Element3Face;
 } // end of namespace fem
 
 namespace stressbalance {
@@ -90,6 +91,13 @@ protected:
   void residual_source_term(const fem::Element3 &element,
                             const double *surface,
                             Vector2 *residual);
+
+  void residual_basal(const fem::Element3 &element,
+                      const fem::Q1Element3Face &face,
+                      const double *tauc_nodal,
+                      const double *f_nodal,
+                      const Vector2 *u_nodal,
+                      Vector2 *residual);
 
   static PetscErrorCode jacobian_callback(DMDALocalInfo *info,
                                           const Vector2 ***x,
