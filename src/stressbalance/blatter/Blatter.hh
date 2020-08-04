@@ -82,6 +82,11 @@ protected:
 
   void compute_jacobian(DMDALocalInfo *info, const Vector2 ***x, Mat A, Mat J);
 
+  void jacobian_f(const fem::Element3 &element,
+                  const Vector2 *u_nodal,
+                  const double *B_nodal,
+                  double K[16][16]);
+
   void jacobian_basal(const fem::Q1Element3Face &face,
                       const double *tauc_nodal,
                       const double *f_nodal,

@@ -636,7 +636,7 @@ static void jacobian_dirichlet(const DMDALocalInfo &info, Parameters **P, Mat J)
 void Blatter::jacobian_basal(const fem::Q1Element3Face &face,
                              const double *tauc_nodal,
                              const double *f_nodal,
-                             const Vector2 *u_nodal,
+                             const Vector2 *velocity,
                              double K[16][16]) {
   int Nk = fem::q13d::n_chi;
 
@@ -646,7 +646,7 @@ void Blatter::jacobian_basal(const fem::Q1Element3Face &face,
     *tauc = m_work[0],
     *floatation = m_work[1];
 
-  face.evaluate(u_nodal, u);
+  face.evaluate(velocity, u);
   face.evaluate(tauc_nodal, tauc);
   face.evaluate(f_nodal, floatation);
 
@@ -674,6 +674,80 @@ void Blatter::jacobian_basal(const fem::Q1Element3Face &face,
       }
     }
   }
+}
+
+void Blatter::jacobian_f(const fem::Element3 &element,
+                         const Vector2 *velocity,
+                         const double *hardness,
+                         double K[16][16]) {
+  int Nk = fem::q13d::n_chi;
+
+  Vector2
+    *u   = m_work2[0],
+    *u_x = m_work2[1],
+    *u_y = m_work2[2],
+    *u_z = m_work2[3];
+
+  double *B = m_work[0];
+
+  element.evaluate(velocity, u, u_x, u_y, u_z);
+  element.evaluate(hardness, B);
+
+  // loop over all quadrature points
+  for (int q = 0; q < element.n_pts(); ++q) {
+    auto W = element.weight(q);
+
+    double
+      ux = u_x[q].u,
+      uy = u_y[q].u,
+      uz = u_z[q].u,
+      vx = u_x[q].v,
+      vy = u_y[q].v,
+      vz = u_z[q].v;
+
+    double gamma = (ux * ux + vy * vy + ux * vy +
+                    0.25 * ((uy + vx) * (uy + vx) + uz * uz + vz * vz));
+
+    double eta, deta;
+    m_flow_law->effective_viscosity(B[q], gamma, &eta, &deta);
+
+    // loop over test and trial functions, computing the upper-triangular part of
+    // the element Jacobian
+    for (int t = 0; t < Nk; ++t) {
+      auto psi = element.chi(q, t);
+      for (int s = t; s < Nk; ++s) {
+        auto phi = element.chi(q, s);
+
+        double
+          gamma_u = 2.0 * ux * phi.dx + vy * phi.dx + 0.5 * phi.dy * (uy + vx) + 0.5 * uz * phi.dz,
+          gamma_v = 2.0 * vy * phi.dy + ux * phi.dy + 0.5 * phi.dx * (uy + vx) + 0.5 * vz * phi.dz;
+
+        double
+          eta_u = deta * gamma_u,
+          eta_v = deta * gamma_v;
+
+        // Picard part
+        K[t * 2 + 0][s * 2 + 0] += W * eta * (4.0 * psi.dx * phi.dx + psi.dy * phi.dy + psi.dz * phi.dz);
+        K[t * 2 + 0][s * 2 + 1] += W * eta * (2.0 * psi.dx * phi.dy + psi.dy * phi.dx);
+        K[t * 2 + 1][s * 2 + 0] += W * eta * (2.0 * psi.dy * phi.dx + psi.dx * phi.dy);
+        K[t * 2 + 1][s * 2 + 1] += W * eta * (4.0 * psi.dy * phi.dy + psi.dx * phi.dx + psi.dz * phi.dz);
+        // extra Newton terms
+        K[t * 2 + 0][s * 2 + 0] += W * eta_u * (psi.dx * (4.0 * ux + 2.0 * vy) +
+                                                psi.dy * (uy + vx) +
+                                                psi.dz * uz);
+        K[t * 2 + 0][s * 2 + 1] += W * eta_v * (psi.dx * (4.0 * ux + 2.0 * vy) +
+                                                psi.dy * (uy + vx) +
+                                                psi.dz * uz);
+        K[t * 2 + 1][s * 2 + 0] += W * eta_u * (psi.dx * (uy + vx) +
+                                                psi.dy * (4.0 * vy + 2.0 * ux) +
+                                                psi.dz * vz);
+        K[t * 2 + 1][s * 2 + 1] += W * eta_v * (psi.dx * (uy + vx) +
+                                                psi.dy * (4.0 * vy + 2.0 * ux) +
+                                                psi.dz * vz);
+      }
+    }
+  } // end of the loop over q
+
 }
 
 void Blatter::compute_jacobian(DMDALocalInfo *petsc_info,
@@ -705,32 +779,31 @@ void Blatter::compute_jacobian(DMDALocalInfo *petsc_info,
     face4(dx, dy, fem::Q1Quadrature4()),     // 4-point Gaussian quadrature
     face100(dx, dy, fem::Q1QuadratureN(10)); // 100-point quadrature for grounding lines
 
-  DataAccess<Parameters**> P(info.da, 2, GHOSTED);
-  DataAccess<double***> hardness(info.da, 3, GHOSTED);
-
   // Maximum number of nodes per element
   const int Nk = fem::q13d::n_chi;
   assert(element.n_chi() <= Nk);
 
   // Maximum number of quadrature points per element or face
-  const int Nq = 100;
-  assert(element.n_pts() <= Nq);
-  assert(face4.n_pts() <= Nq);
-  assert(face100.n_pts() <= Nq);
+  assert(element.n_pts() <= m_Nq);
+  assert(face4.n_pts() <= m_Nq);
+  assert(face100.n_pts() <= m_Nq);
 
-  // 2D vector quantities evaluated at quadrature points
-  Vector2 u_nodal[Nk], u[Nq], u_x[Nq], u_y[Nq], u_z[Nq];
+  // 2D vector quantities
+  Vector2 u_nodal[Nk];
 
-  // scalar quantities evaluated at quadrature points
-  double B_nodal[Nk], Bq[Nq];
-  double tauc_nodal[Nk], tauc[Nq];
-  double f_nodal[Nk], floatation[Nq];
+  // scalar quantities
+  double B_nodal[Nk];
+  double tauc_nodal[Nk];
+  double f_nodal[Nk];
 
   // scalar quantities evaluated at element nodes
   int node_type[Nk];
   double x_nodal[Nk];
   double y_nodal[Nk];
   std::vector<double> z_nodal(Nk);
+
+  DataAccess<Parameters**> P(info.da, 2, GHOSTED);
+  DataAccess<double***> hardness(info.da, 3, GHOSTED);
 
   // loop over all the elements that have at least one owned node
   for (int j = info.gys; j < info.gys + info.gym - 1; j++) {
@@ -765,79 +838,23 @@ void Blatter::compute_jacobian(DMDALocalInfo *petsc_info,
         element.reset(i, j, k, z_nodal);
 
         // Get nodal values of u.
-        element.nodal_values(x, u_nodal);
+        {
+          element.nodal_values(x, u_nodal);
 
-        // Don't contribute to Dirichlet nodes
-        for (int n = 0; n < Nk; ++n) {
-          auto I = element.local_to_global(n);
-          if (dirichlet_node(info, I)) {
-            element.mark_row_invalid(n);
-            element.mark_col_invalid(n);
-            u_nodal[n] = u_bc(x_nodal[n], y_nodal[n], z_nodal[n]);
+          // Don't contribute to Dirichlet nodes
+          for (int n = 0; n < Nk; ++n) {
+            auto I = element.local_to_global(n);
+            if (dirichlet_node(info, I)) {
+              element.mark_row_invalid(n);
+              element.mark_col_invalid(n);
+              u_nodal[n] = u_bc(x_nodal[n], y_nodal[n], z_nodal[n]);
+            }
           }
         }
 
-        // evaluate partial derivatives at quadrature points
-        element.evaluate(u_nodal, u, u_x, u_y, u_z);
-
-        // evaluate hardness at quadrature points
         element.nodal_values((double***)hardness, B_nodal);
-        element.evaluate(B_nodal, Bq);
 
-        // loop over all quadrature points
-        for (int q = 0; q < element.n_pts(); ++q) {
-          auto W = element.weight(q);
-
-          double
-            ux = u_x[q].u,
-            uy = u_y[q].u,
-            uz = u_z[q].u,
-            vx = u_x[q].v,
-            vy = u_y[q].v,
-            vz = u_z[q].v;
-
-          double gamma = (ux * ux + vy * vy + ux * vy +
-                          0.25 * ((uy + vx) * (uy + vx) + uz * uz + vz * vz));
-
-          double eta, deta;
-          m_flow_law->effective_viscosity(Bq[q], gamma, &eta, &deta);
-
-          // loop over test and trial functions, computing the upper-triangular part of
-          // the element Jacobian
-          for (int t = 0; t < Nk; ++t) {
-            auto psi = element.chi(q, t);
-            for (int s = t; s < Nk; ++s) {
-              auto phi = element.chi(q, s);
-
-              double
-                gamma_u = 2.0 * ux * phi.dx + vy * phi.dx + 0.5 * phi.dy * (uy + vx) + 0.5 * uz * phi.dz,
-                gamma_v = 2.0 * vy * phi.dy + ux * phi.dy + 0.5 * phi.dx * (uy + vx) + 0.5 * vz * phi.dz;
-
-              double
-                eta_u = deta * gamma_u,
-                eta_v = deta * gamma_v;
-
-              // Picard part
-              K[t * 2 + 0][s * 2 + 0] += W * eta * (4.0 * psi.dx * phi.dx + psi.dy * phi.dy + psi.dz * phi.dz);
-              K[t * 2 + 0][s * 2 + 1] += W * eta * (2.0 * psi.dx * phi.dy + psi.dy * phi.dx);
-              K[t * 2 + 1][s * 2 + 0] += W * eta * (2.0 * psi.dy * phi.dx + psi.dx * phi.dy);
-              K[t * 2 + 1][s * 2 + 1] += W * eta * (4.0 * psi.dy * phi.dy + psi.dx * phi.dx + psi.dz * phi.dz);
-              // extra Newton terms
-              K[t * 2 + 0][s * 2 + 0] += W * eta_u * (psi.dx * (4.0 * ux + 2.0 * vy) +
-                                                      psi.dy * (uy + vx) +
-                                                      psi.dz * uz);
-              K[t * 2 + 0][s * 2 + 1] += W * eta_v * (psi.dx * (4.0 * ux + 2.0 * vy) +
-                                                      psi.dy * (uy + vx) +
-                                                      psi.dz * uz);
-              K[t * 2 + 1][s * 2 + 0] += W * eta_u * (psi.dx * (uy + vx) +
-                                                      psi.dy * (4.0 * vy + 2.0 * ux) +
-                                                      psi.dz * vz);
-              K[t * 2 + 1][s * 2 + 1] += W * eta_v * (psi.dx * (uy + vx) +
-                                                      psi.dy * (4.0 * vy + 2.0 * ux) +
-                                                      psi.dz * vz);
-            }
-          }
-        } // end of the loop over q
+        jacobian_f(element, u_nodal, B_nodal, K);
 
         // include basal drag
         if (k == 0) {
@@ -853,7 +870,7 @@ void Blatter::compute_jacobian(DMDALocalInfo *petsc_info,
           // face 4 is the bottom face in fem::q13d::incident_nodes
           face->reset(4, z_nodal);
 
-          jacobian_basal(*face, tauc, f_nodal, u_nodal, K);
+          jacobian_basal(*face, tauc_nodal, f_nodal, u_nodal, K);
         }
 
         // fill the lower-triangular part of the element Jacobian using the fact that J is
