@@ -697,7 +697,7 @@ void Hydrology::enforce_bounds(const IceModelVec2CellType &cell_type,
     fresh_water_density = m_config->get_number("constants.fresh_water.density"),
     kg_per_m            = m_grid->cell_area() * fresh_water_density; // kg m-1
 
-  const bool tillwat_ocean = m_config->get_boolean("hydrology.set_tillwat_ocean"); 
+  const bool tillwat_ocean = m_config->get_flag("hydrology.set_tillwat_ocean");
 
   for (Points p(*m_grid); p; p.next()) {
     const int i = p.i(), j = p.j();
